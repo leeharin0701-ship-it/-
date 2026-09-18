@@ -100,3 +100,35 @@ with c1:
 with c2:
     st.subheader("🟢 고령화율 낮은 곳 10")
     st.dataframe(merged.nsmallest(10, "고령화율")[cols].reset_index(drop=True))
+
+# 사이드바에 연도 선택 슬라이더 배치
+st.sidebar.header("⚙️ 옵션 설정")
+available_years = sorted(df_pop['연도'].unique())
+selected_year = st.sidebar.slider(
+    "분석 연도 선택", 
+    min_value=min(available_years), 
+    max_value=max(available_years), 
+    value=max(available_years) # 기본값은 가장 최신 연도
+)
+
+# 선택한 연도로 데이터 필터링 교체
+df_latest = df_pop[df_pop['연도'] == selected_year].copy()
+
+# 사이드바에 시도 선택 셀렉트박스 추가
+sido_list = ['전국'] + sorted(sigungu_pop['시도'].dropna().unique().tolist())
+selected_sido = st.sidebar.selectbox("시도별 상세보기", sido_list)
+
+# 선택된 시도에 따라 데이터 필터링
+if selected_sido != '전국':
+    map_data = sigungu_pop[sigungu_pop['시도'] == selected_sido]
+else:
+    map_data = sigungu_pop
+
+# CSV 다운로드 버튼
+csv_data = sigungu_pop.to_csv(index=False).encode('utf-8-sig')
+st.sidebar.download_button(
+    label="📥 현재 데이터 CSV 다운로드",
+    data=csv_data,
+    file_name=f"aging_population_{selected_year}.csv",
+    mime="text/csv",
+)
