@@ -1,108 +1,42 @@
-import re
-import requests
 import pandas as pd
+import numpy as np
+import requests
 import streamlit as st
 import plotly.express as px
 
-st.set_page_config(page_title="전국 고령화 지도", layout="wide")
-st.title("🗺️ 전국 고령화 지도")
-st.caption("시군구별 65세 이상 인구 비율 (행정안전부 주민등록 인구)")
-
-POP_URL = "https://raw.githubusercontent.com/greatsong/modudata/main/data/population_yearly.csv.gz"
-GEO_URL = "https://raw.githubusercontent.com/greatsong/modudata/main/data/boundaries/sigungu_kr.geojson"
-
-@st.cache_data(show_spinner="인구 데이터를 불러오는 중입니다...")
-def load_population():
-    # '코드' 열은 앞자리 0이 사라지지 않게 글자로 읽습니다
-    return pd.read_csv(POP_URL, dtype={"코드": str})
-
-@st.cache_data(show_spinner="지도 경계를 불러오는 중입니다...")
-def load_geojson():
-    return requests.get(GEO_URL, timeout=30).json()
-
-df = load_population()
-geojson = load_geojson()
-
-# 1. 가장 최신 연도만 사용
-latest_year = int(df["연도"].max())
-df = df[df["연도"] == latest_year].copy()
-
-# 2. '계_'로 시작하는 나이 열만 (남_·여_ 열까지 더하면 두 배가 됩니다)
-total_cols = [c for c in df.columns if c.startswith("계_")]
-
-def age_of(col):
-    m = re.match(r"계_(\d+)세", col)
-    return int(m.group(1)) if m else None
-
-# 3. 그중 65세 이상 열만 ('계_65세' ~ '계_100세 이상')
-elderly_cols = [c for c in total_cols if age_of(c) is not None and age_of(c) >= 65]
-
-# 4. 동 단위로 전체 인구·고령 인구 계산
-df["전체인구"] = df[total_cols].sum(axis=1)
-df["고령인구"] = df[elderly_cols].sum(axis=1)
-
-# 5. '코드' 앞 5자리 = 시군구 코드 → 시군구별로 묶어 비율 계산
-df["시군구코드"] = df["코드"].str[:5]
-grouped = df.groupby("시군구코드")[["전체인구", "고령인구"]].sum().reset_index()
-grouped["고령화율"] = (grouped["고령인구"] / grouped["전체인구"] * 100).round(2)
-
-# 경계 파일에서 코드 → 시군구·시도 이름 짝 만들기
-names = pd.DataFrame([
-    {
-        "시군구코드": str(f["properties"]["코드"]),
-        "시군구": f["properties"]["시군구"],
-        "시도": f["properties"]["시도"],
-    }
-    for f in geojson["features"]
-])
-merged = grouped.merge(names, on="시군구코드", how="left")
-
-# 6. 5단계 색 구간 (전국 시군구를 다섯 덩어리로 나눈 실제 경계값)
-BINS = [0, 19, 23, 28, 38, 100]
-LABELS = ["19% 미만", "19~23%", "23~28%", "28~38%", "38% 이상"]
-COLORS = {
-    "19% 미만": "#fee6ce",
-    "19~23%": "#fdc086",
-    "23~28%": "#f79646",
-    "28~38%": "#e8590c",
-    "38% 이상": "#a63603",
-}
-merged["단계"] = pd.cut(merged["고령화율"], bins=BINS, labels=LABELS, right=False)
-
-# 7. 단계구분도 그리기 (배경 지도 타일 없이 경계만)
-fig = px.choropleth(
-    merged,
-    geojson=geojson,
-    locations="시군구코드",
-    featureidkey="properties.코드",
-    color="단계",
-    category_orders={"단계": LABELS},
-    color_discrete_map=COLORS,
-    hover_name="시군구",
-    hover_data={"고령화율": True, "시도": True, "시군구코드": False, "단계": False},
-    labels={"고령화율": "65세 이상 비율(%)"},
-)
-fig.update_geos(fitbounds="locations", visible=False)
-fig.update_layout(
-    margin=dict(l=0, r=0, t=10, b=0),
-    height=700,
-    legend_title_text=f"65세 이상 비율 ({latest_year}년)",
+# 1. 스트림릿 페이지 기본 설정 (와이드 레이아웃 사용)
+st.set_page_config(
+    page_title="전국 고령화 지도",
+    page_icon="🗺️",
+    layout="wide"
 )
 
-st.plotly_chart(fig, width="stretch")
+st.title("🗺️ 대한민국 시군구별 고령화 지도 대시보드")
+st.write("연도별·지역별 65세 이상 인구 비율(고령화율)을 지도 단계구분도와 표로 확인하는 앱입니다.")
 
-# 8. 지도 아래 순위 표 두 개
-c1, c2 = st.columns(2)
-cols = ["시도", "시군구", "고령화율"]
-with c1:
-    st.subheader("🔴 고령화율 높은 곳 10")
-    st.dataframe(merged.nlargest(10, "고령화율")[cols].reset_index(drop=True))
-with c2:
-    st.subheader("🟢 고령화율 낮은 곳 10")
-    st.dataframe(merged.nsmallest(10, "고령화율")[cols].reset_index(drop=True))
+# 2. 데이터 로드 함수 (캐시를 사용하여 앱 실행 속도 향상)
+@st.cache_data
+def load_data():
+    # 전국 읍·면·동 연도별 인구 데이터 (CSV.gz)
+    pop_url = "https://raw.githubusercontent.com/greatsong/modudata/main/data/population_yearly.csv.gz"
+    # '코드' 열은 자릿수 손실 방지를 위해 확실하게 문자열(str)로 읽어옵니다.
+    df_pop = pd.read_csv(pop_url, dtype={'코드': str})
+    
+    # 전국 시군구 경계 GeoJSON 데이터
+    geo_url = "https://raw.githubusercontent.com/greatsong/modudata/main/data/boundaries/sigungu_kr.geojson"
+    response = requests.get(geo_url)
+    geojson_data = response.json()
+    
+    return df_pop, geojson_data
 
-# 사이드바에 연도 선택 슬라이더 배치
-st.sidebar.header("⚙️ 옵션 설정")
+# 데이터 불러오기 실행
+with st.spinner("데이터를 불러오는 중입니다... 잠시만 기다려주세요."):
+    df_pop, sigungu_geo = load_data()
+
+# 3. 사이드바 설정 (연도 선택 및 지역 필터링)
+st.sidebar.header("⚙️ 지도 및 데이터 옵션")
+
+# 연도 선택 슬라이더
 available_years = sorted(df_pop['연도'].unique())
 selected_year = st.sidebar.slider(
     "분석 연도 선택", 
@@ -111,24 +45,113 @@ selected_year = st.sidebar.slider(
     value=max(available_years) # 기본값은 가장 최신 연도
 )
 
-# 선택한 연도로 데이터 필터링 교체
-df_latest = df_pop[df_pop['연도'] == selected_year].copy()
+# 4. 선택한 연도의 데이터 전처리
+df_filtered_year = df_pop[df_pop['연도'] == selected_year].copy()
 
-# 사이드바에 시도 선택 셀렉트박스 추가
+# 행정동 코드(10자리)에서 앞 5자리를 추출하여 시군구 코드 생성
+df_filtered_year['시군구코드'] = df_filtered_year['코드'].str.zfill(10).str.slice(0, 5)
+
+# 나이별 열 이름 자동 인식 ('계_X세' 형식)
+all_age_cols = []
+valid_age_cols = []
+
+for col in df_filtered_year.columns:
+    if col.startswith('계_') and '세' in col:
+        all_age_cols.append(col)
+        num_str = col.replace('계_', '').replace('세', '').replace(' 이상', '')
+        if num_str.isdigit() and int(num_str) >= 65:
+            valid_age_cols.append(col)
+
+# 전체 인구 및 65세 이상 인구 계산
+df_filtered_year['전체인구'] = df_filtered_year[all_age_cols].sum(axis=1)
+df_filtered_year['65세이상인구'] = df_filtered_year[valid_age_cols].sum(axis=1)
+
+# 시군구별로 그룹화하여 합계 구하기
+sigungu_pop = df_filtered_year.groupby('시군구코드').agg({
+    '시도': 'first',
+    '시군구': 'first',
+    '전체인구': 'sum',
+    '65세이상인구': 'sum'
+}).reset_index()
+
+# 고령화율(%) 계산
+sigungu_pop['고령화율'] = (sigungu_pop['65세이상인구'] / sigungu_pop['전체인구']) * 100
+
+# 5. 5단계 구간 나누기 (경계값: 19%, 23%, 28%, 38%)
+bins = [-np.inf, 19, 23, 28, 38, np.inf]
+labels = ['19% 미만', '19%~23%', '23%~28%', '28%~38%', '38% 이상']
+sigungu_pop['고령화구간'] = pd.cut(sigungu_pop['고령화율'], bins=bins, labels=labels)
+
+# 시도별 상세보기 필터 (사이드바)
 sido_list = ['전국'] + sorted(sigungu_pop['시도'].dropna().unique().tolist())
-selected_sido = st.sidebar.selectbox("시도별 상세보기", sido_list)
+selected_sido = st.sidebar.selectbox("시도별 상세보기 필터", sido_list)
 
-# 선택된 시도에 따라 데이터 필터링
 if selected_sido != '전국':
     map_data = sigungu_pop[sigungu_pop['시도'] == selected_sido]
 else:
     map_data = sigungu_pop
 
-# CSV 다운로드 버튼
+# 6. Plotly를 이용한 단계구분도(Choropleth) 시각화
+fig = px.choropleth(
+    map_data,
+    geojson=sigungu_geo,
+    locations='시군구코드',
+    featureidkey="properties.코드", # GeoJSON의 시군구 코드 속성과 매칭
+    color='고령화구간',
+    color_discrete_map={
+        '19% 미만': '#edf8fb',
+        '19%~23%': '#b2e2e2',
+        '23%~28%': '#66c2a4',
+        '28%~38%': '#2ca25f',
+        '38% 이상': '#006d2c'
+    },
+    category_orders={'고령화구간': labels},
+    hover_name='시군구',
+    hover_data={
+        '시군구코드': False,
+        '시도': True,
+        '고령화율': ':.2f'
+    },
+    labels={'고령화구간': '고령화율 구간', '시도': '시도', '고령화율': '고령화율(%)'}
+)
+
+# 배경 지도 타일 없이 경계선만 깔끔하게 표시 (지역 선택에 따라 지도 자동 확대)
+fig.update_geos(fitbounds="locations", visible=False)
+fig.update_layout(
+    margin={"r":0, "t":0, "l":0, "b":0},
+    legend_title_text=f'<b>{selected_year}년 고령화율</b>'
+)
+
+st.subheader(f"📍 {selected_year}년 시군구별 고령화 지도 ({selected_sido})")
+st.plotly_chart(fig, use_container_width=True)
+
+# 7. 데이터 다운로드 버튼 (사이드바)
+st.sidebar.markdown("---")
 csv_data = sigungu_pop.to_csv(index=False).encode('utf-8-sig')
 st.sidebar.download_button(
-    label="📥 현재 데이터 CSV 다운로드",
+    label=f"📥 {selected_year}년 데이터 CSV 다운로드",
     data=csv_data,
     file_name=f"aging_population_{selected_year}.csv",
     mime="text/csv",
 )
+
+st.markdown("---")
+
+# 8. 지도 아래 고령화율 상위 10개 및 하위 10개 표 나란히 배치 (전국 기준)
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader(f"🔴 {selected_year}년 고령화율 높은 시군구 Top 10")
+    top_10 = sigungu_pop.nlargest(10, '고령화율')[['시도', '시군구', '고령화율']]
+    top_10['고령화율'] = top_10['고령화율'].round(2).astype(str) + '%'
+    top_10.reset_index(drop=True, inplace=True)
+    top_10.index = top_10.index + 1
+    st.dataframe(top_10, use_container_width=True)
+
+with col2:
+    st.subheader(f"🔵 {selected_year}년 고령화율 낮은 시군구 Top 10")
+    bottom_10 = sigungu_pop.nsmallest(10, '고령화율')[['시도', '시군구', '고령화율']]
+    bottom_10['고령화율'] = bottom_10['고령화율'].round(2).astype(str) + '%'
+    bottom_10.reset_index(drop=True, inplace=True)
+    bottom_10.index = bottom_10.index + 1
+    st.dataframe(bottom_10, use_container_width=True)
